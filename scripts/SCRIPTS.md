@@ -23,6 +23,14 @@ PY      = r"C:\Users\<you>\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\py
 OPENRGB = r"C:\Program Files\OpenRGB\OpenRGB.exe"
 ```
 
+`rgb.py` 的 OpenRGB 路径支持环境变量覆盖，可以不改代码：
+
+```bash
+set OPENRGB_EXE=D:\Tools\OpenRGB\OpenRGB.exe
+```
+
+**路径里尽量不要有中文**。本项目为了可读性用了 `灯效.bat`，结果在 PowerShell 5.1 下踩了一整类编码坑（见 guide 第 8 节末尾）。换成 `C:\rgb\` 能省掉很多麻烦。
+
 ## 典型用法
 
 ```bash
@@ -45,6 +53,40 @@ python calib_leds.py 4
 1. OpenRGB 已安装，且已手工填过每路 ARGB 的灯珠数（见 guide 第 4 节）
 2. 微星平台需要 OpenRGB 带 `--server` 启动，或让 `rgb.py` 自己拉起
 3. 写 flash 前先跑一次 `python flash_precheck.py` 确认灯区尺寸与接线一致
+4. **确认 OpenRGB 没有以 Windows 服务方式常驻**（见下节）
+
+## ⚠️ 先确认没有 OpenRGB 服务在跑
+
+如果安装 OpenRGB 时勾了「Install as a service」，会有一个 `LocalSystem` 身份的 `OpenRGB` 服务开机自启，**抢占 6742 端口**。它用的是独立配置目录 `C:\Program Files\OpenRGB\service_config\`，看不到你手工填的灯珠数。
+
+症状：`python rgb.py zones` 输出 `JRAINBOW1 0 颗`，但 `%APPDATA%\OpenRGB\Configuration.json` 里明明是 8。
+
+检查：
+
+```powershell
+Get-Service OpenRGB | Format-List Name,Status,StartType
+```
+
+或看端口占用者的 SessionId（**`0` 就是服务实例**）：
+
+```powershell
+Get-NetTCPConnection -LocalPort 6742 -State Listen | Select-Object OwningProcess
+Get-Process -Id <PID> | Select-Object Id,ProcessName,SessionId
+```
+
+不想用服务就停掉：
+
+```powershell
+Stop-Service OpenRGB -Force
+Set-Service OpenRGB -StartupType Disabled
+```
+
+想用服务常驻，先把配置同步过去：
+
+```powershell
+Copy-Item "$env:APPDATA\OpenRGB\Configuration.json" `
+          "C:\Program Files\OpenRGB\service_config\Configuration.json"
+```
 
 ## 重要限制
 

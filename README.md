@@ -49,7 +49,7 @@
 | [7. 华硕差异](docs/guide.md#7-华硕平台有什么不同) | 独立 COMMIT 命令、官方 `@save` 标注、奥创覆盖问题 |
 | [8. 自启 vs flash](docs/guide.md#8-开机自启-vs-写-flash该选哪个) | 两种方案对比；OpenRGB 会删你自启快捷方式的坑 |
 | [9. 实测数据](docs/guide.md#9-附实测数据速查) | 设备参数、SDK 协议要点、22 个可写模式 |
-| [10. 踩坑清单](docs/guide.md#10-踩坑清单按踩到的顺序) | 12 条，按踩到的顺序排列 |
+| [10. 踩坑清单](docs/guide.md#10-踩坑清单按踩到的顺序) | 15 条，按踩到的顺序排列 |
 
 ---
 
@@ -95,6 +95,21 @@ if (direct_mode) {
 `QSpinBox` 的 UIA `set_value()` 只改显示文本，不触发 Qt 内部 `value` 变更，所以 `ResizeZone()` 从未被调用，配置文件里存的还是 0。**必须用真实键盘输入。**
 
 验证方法：看 `%APPDATA%\OpenRGB\Configuration.json` 里 `controllers[0].leds` 的**条目总数**，成功时应该等于 `1 + 各路灯珠数之和`。
+
+### 别勾「Install as a service」
+
+OpenRGB 的安装器提供「Install as a service」选项。勾了之后会创建以 `LocalSystem` 身份运行的 Windows 服务，**开机自启并抢占 6742 端口**，而且它的配置目录是独立的 `C:\Program Files\OpenRGB\service_config\`，看不到你在 GUI 里手工填的灯珠数。
+
+症状是脚本读到 `JRAINBOW1 0 颗`，但你打开 `%APPDATA%\OpenRGB\Configuration.json` 明明是 8。
+
+判别方法：`Get-Process -Id <占用6742的PID>` 看 `SessionId`，**`0` 就是服务实例**（手动启动的在 Session 1）。
+
+```powershell
+Stop-Service OpenRGB -Force
+Set-Service OpenRGB -StartupType Disabled
+```
+
+如果确实想用服务常驻，必须先把 `%APPDATA%\OpenRGB\Configuration.json` 复制到 `service_config\` 再启用。
 
 ---
 

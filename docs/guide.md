@@ -99,6 +99,21 @@ MainEngineThread is returning 1601
 
 ---
 
+### 3.3 安装器最后一个选项：「Install as a service」不要勾
+
+安装向导末尾会问要不要装成 Windows 服务。**除非你确实需要它开机常驻，否则不要勾**。
+
+勾了之后会创建一个 `LocalSystem` 身份、`Automatic` 启动的服务，开机就抢占 6742 端口，而且它读的是独立配置目录 `C:\Program Files\OpenRGB\service_config\`，**看不到你在 GUI 里填的灯珠数**。症状和排查方法见第 8 节「安装时勾了 Install as a service」。
+
+已经勾了也不难补救：
+
+```powershell
+Stop-Service OpenRGB -Force
+Set-Service OpenRGB -StartupType Disabled
+```
+
+---
+
 ## 4. 首次配置：灯珠数量必须手工填
 
 ### 4.1 为什么会弹 Zone Initialization
@@ -379,6 +394,135 @@ void RGBController_AuraMainboard::DeviceSaveMode() {
 
 解决办法：换个文件名（比如 `OpenRGB-RGB.lnk`），就不会被识别成它自己管理的那一项。
 
+### 踩坑：安装时勾了「Install as a service」→ 灯珠数全变 0
+
+这是最隐蔽的一个坑，也是本项目后期踩到的。OpenRGB 的 MSI 安装器里有个「Install as a service」选项，如果勾了，会创建一个 Windows 服务：
+
+| 属性 | 值 |
+|---|---|
+| 服务名 | `OpenRGB` |
+| 显示名 | `OpenRGB` |
+| 描述 | `OpenRGB SDK Server` |
+| 启动类型 | `Automatic`（开机自启） |
+| 登录身份 | `LocalSystem` |
+| 注册表 | `HKLM\SYSTEM\CurrentControlSet\Services\OpenRGB`（`Start=2`、`Type=16`） |
+
+它带来三个连锁问题：
+
+**1. 抢占 6742 端口**
+
+服务以 LocalSystem 身份、开机就启动，先占住 SDK 端口。之后你用脚本调 `127.0.0.1:6742`，连到的是**服务实例**，不是你手动启动的那个。
+
+**2. 配置目录完全隔离**
+
+服务读的是 `C:\Program Files\OpenRGB\service_config\`，而不是 `%APPDATA%\OpenRGB\`。两个目录互不相干，改一个不影响另一个。
+
+**3. 灯珠数永远是 0**
+
+因为 `service_config\` 下没有 `Configuration.json`（那个文件是 Zone Initialization 点保存时才生成的），服务实例读到的每个 zone 的 `leds_count` 都是 0，脚本会报：
+
+```
+[1] JRAINBOW1    0 颗
+[2] JRAINBOW2    0 颗
+```
+
+而你打开 `%APPDATA%\OpenRGB\Configuration.json` 看，明明是 8/8 —— 两边都对，只是看的不是同一个文件。
+
+**排查方法**
+
+先看端口是谁占的：
+
+```powershell
+Get-NetTCPConnection -LocalPort 6742 -State Listen |
+    Select-Object LocalAddress,LocalPort,OwningProcess
+```
+
+拿到 PID 再看进程：
+
+```powershell
+Get-Process -Id <PID> | Select-Object Id,ProcessName,SessionId,StartTime
+```
+
+**`SessionId = 0` 就是服务实例**（服务跑在 Session 0，你手动启动的在 Session 1）。这是最快的判别方法。
+
+也可以直接查服务：
+
+```powershell
+Get-Service OpenRGB | Format-List Name,Status,StartType
+Get-CimInstance Win32_Service -Filter "Name='OpenRGB'" |
+    Select-Object Name,StartMode,StartName,PathName
+```
+
+**处理方式（二选一）**
+
+不想用服务常驻（本机最终采用）：
+
+```powershell
+Stop-Service OpenRGB -Force
+Set-Service OpenRGB -StartupType Disabled
+```
+
+停掉后端口释放，脚本重新拉起的是自己的实例，灯珠数立刻恢复正常。
+
+确实想用服务常驻，那必须把配置同步过去：
+
+```powershell
+Copy-Item "$env:APPDATA\OpenRGB\Configuration.json" `
+          "C:\Program Files\OpenRGB\service_config\Configuration.json"
+```
+
+然后再启用服务。否则每次开机灯效脚本都会连到一个「空配置」实例上。
+
+> 顺带一提：服务实例的日志里同样会报 PawnIO 失败（`Could not open PawnIO, PawnIO initialization aborted`），和手动启动时一样，无害。
+
+### 踩坑：中文路径的快捷方式会变乱码
+
+如果你用 PowerShell 创建指向中文路径的快捷方式，很容易得到这种文件名：
+
+```
+RGB鐏\ue21b晥鎺у埗.lnk
+```
+
+**成因**：`灯效` 的 UTF-8 字节是 `e7 81 af e6 95 88`，被按 GBK 解码就变成 `鐏晥`。PowerShell 5.1 的 `WScript.Shell.CreateShortcut` 按 ANSI（简体中文系统即 GBK）处理脚本里的中文字面量，于是写进 lnk 的路径是错的。
+
+**症状**：双击提示「无法找到该项目」或「无法关联」。因为 lnk 里存的 `RELATIVE_PATH` 指向一个**根本不存在的文件** —— 名字看起来像 OpenRGB 的东西（图标指向 `OpenRGB.exe`），实际打不开。
+
+**验证方法**
+
+```powershell
+$sc = (New-Object -ComObject WScript.Shell).CreateShortcut("$env:USERPROFILE\Desktop\xxx.lnk")
+$sc.TargetPath
+Test-Path -LiteralPath $sc.TargetPath   # ← 必须为 True，False 就说明路径是坏的
+```
+
+**解法**：不要用 `powershell -File script.ps1`。PS 5.1 会按 GBK 读脚本**文件**，脚本里的中文再次被破坏，可能出现变量为 `null` 却仍「成功」执行、生成又一个坏快捷方式的情况。
+
+改用 `-EncodedCommand`，UTF-16-LE + base64 完全绕开代码页：
+
+```python
+import base64, subprocess
+
+ps = r'''
+$ws = New-Object -ComObject WScript.Shell
+$sc = $ws.CreateShortcut("C:\Users\me\Desktop\RGB风扇灯效控制.lnk")
+$sc.TargetPath = "C:\Users\me\Desktop\灯效.bat"
+$sc.WorkingDirectory = "C:\Users\me\Desktop"
+$sc.IconLocation = "C:\Program Files\OpenRGB\OpenRGB.exe,0"
+$sc.Save()
+'''
+enc = base64.b64encode(ps.encode("utf-16-le")).decode("ascii")
+subprocess.run(["powershell", "-NoProfile", "-EncodedCommand", enc])
+```
+
+写完必须回读校验，不要只看「没报错」：
+
+```python
+sc = shortcut.Read(...)
+assert os.path.exists(sc.TargetPath), "目标不存在，快捷方式是坏的"
+```
+
+**更根本的建议**：路径里不要用中文。把脚本目录改成 `C:\rgb\` 之类，能省掉一整类问题。本项目为了可读性保留了中文路径，代价就是这些额外校验。
+
 ---
 
 ## 9. 附：实测数据速查
@@ -448,6 +592,9 @@ Rainbow flashing / Color ring double flashing / Stack / Fire
 | 10 | 两个风扇只能同色，无法分别控制 | 并联分线器 | 换串联式集线器，或用软件规避 |
 | 11 | PWM 风扇接 SYS_FAN 有异响 | SYS_FAN 默认 DC 模式 | 进 BIOS 改成 PWM |
 | 12 | 华硕平台写完 flash 重启失效 | 奥创中心开机时刷回自己的配置 | 卸载/禁用奥创 |
+| 13 | 脚本读到 `JRAINBOW1 0 颗`，配置文件里明明是 8 | OpenRGB 以服务方式常驻，服务用独立配置目录 `service_config\` | 停用服务，或把配置复制过去 |
+| 14 | 桌面快捷方式文件名乱码、双击打不开 | PowerShell 5.1 用 GBK 写入中文路径（UTF-8 字节被当 GBK 解码） | 用 `-EncodedCommand`，写完 `Test-Path` 校验 |
+| 15 | `powershell -File` 修乱码脚本反而生成新的坏快捷方式 | PS 5.1 按 GBK 读脚本文件，中文字面量被破坏 | 改用 `-EncodedCommand` + base64 |
 
 ---
 
